@@ -122,6 +122,19 @@ textarea.code{font:600 14px ui-monospace,Menlo,monospace;min-height:55vh;resize:
 .modal{background:var(--paper);border:4px solid var(--ink);border-radius:var(--r);box-shadow:10px 10px 0 var(--ink);padding:22px;width:100%;max-width:420px}
 .modal h3{font:900 20px "Trebuchet MS",system-ui,sans-serif;margin:0 0 14px;text-transform:uppercase}
 .modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+.dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-top:16px}
+.dash.charts{grid-template-columns:1fr 1fr}
+.dcard{background:var(--paper);border:3px solid var(--ink);border-radius:14px;box-shadow:5px 5px 0 var(--ink);padding:14px;min-width:0}
+.dcard .dl{font:900 12px "Trebuchet MS",system-ui,sans-serif;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.dcard .dv{font:900 22px "Trebuchet MS",system-ui,sans-serif}
+.dcard .dv small{font-size:14px;font-weight:700;color:#5a5443}
+.addrc{grid-column:1/-1;background:var(--blue);color:#fff}
+.addrc .dl{color:#fff}
+.addrc .dv{font-size:16px;word-break:break-all;font-family:ui-monospace,Menlo,monospace}
+.addrc .dsub{font-size:13px;margin:8px 0;word-break:break-all}
+.addrc code{background:var(--yellow);color:var(--ink)}
+.dact{display:flex;gap:10px;flex-wrap:wrap}
+@media(max-width:760px){.dash.charts{grid-template-columns:1fr}}
 @media(max-width:760px){.stats{grid-template-columns:1fr}.stats>div{border-right:0;border-bottom:3px solid var(--ink)}.stats>div:last-child{border-bottom:0}.kv{grid-template-columns:1fr}.nav{display:none}.top{flex-wrap:wrap}}
 </style>
 </head>
@@ -187,8 +200,13 @@ function loginView(err){closeWs();
   const go=async()=>{$('#go').disabled=true;try{await api('/login',{json:{username:$('#u').value.trim(),password:$('#p').value}});boot()}catch(e){$('#le').textContent=e.message;$('#go').disabled=false}};
   $('#go').onclick=go;$('#p').onkeydown=e=>{if(e.key==='Enter')go()};$('#u').focus()}
 
-async function boot(){try{me=await api('/me')}catch{me=null;return loginView()}route()}
+function loadingView(){app().innerHTML=`<div class="login"><div class="card yellow" style="text-align:center"><h1>Panel</h1><p class="sub"><span class="spin"></span>&nbsp;Memuat...</p></div></div>`}
+function withTimeout(p,ms){return Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('Server tidak merespons. Coba muat ulang halaman.')),ms))])}
+async function boot(){loadingView();
+  try{me=await withTimeout(api('/me'),10000)}catch(e){me=null;return loginView(e.message&&e.message!=='Belum login'?e.message:'')}
+  route()}
 window.onhashchange=()=>{if(me)route()};
+window.addEventListener('error',e=>{const a=app();if(a&&!a.innerHTML.trim())a.innerHTML='<div class="login"><div class="card yellow"><h1>Panel</h1><p class="sub">Ada error: '+String(e.message||'')+'</p><button class="btn" onclick="location.reload()">Muat ulang</button></div></div>'});
 function route(){const h=location.hash||'#/';
   if(h.startsWith('#/server/'))return serverView(decodeURIComponent(h.slice(9)));
   if(h==='#/admin'&&me.admin)return adminView();
@@ -238,7 +256,9 @@ async function serverView(id){S=await api('/servers/'+id);
   pollT=setInterval(async()=>{try{const s=await api('/servers/'+S.id);const b=$('#stBadge');if(b)b.innerHTML=badge(s.status)}catch{}},3000);
   ({console:consoleTab,files:filesTab,env:envTab,settings:settingsTab})[tab]()}
 
+let HC=[],HR=[];
 function consoleTab(){
+  HC=[];HR=[];
   const isWeb=(S.type||'node')==='web';
   const notice=me.admin?'Mode admin: semua perintah Termux bebas (termasuk apt dan pkg). Awalan ! kirim input ke bot, $ paksa shell.':
     'Mode user: perintah terbatas ('+(me.userCmds||[]).join(', ')+'). Input bot pakai teks biasa atau awalan !.';
@@ -249,7 +269,7 @@ function consoleTab(){
    <div class="hintbar">${esc(notice)}</div>
    <div class="term" id="term"></div>
    <div class="cmd"><span>$</span><input id="ci" placeholder="${me.admin?'Perintah Termux, contoh: apt install -y python3':'Perintah atau input bot, contoh: ls'}" autocapitalize="off" autocomplete="off" spellcheck="false"><button class="btn red sm" id="stopc">Ctrl+C</button></div>
-   ${statsHtml()}</div>`;
+   </div>${statsHtml()}`;
   wireCopy();
   const term=$('#term');
   const add=l=>{const near=term.scrollTop+term.clientHeight>=term.scrollHeight-30;const d=document.createElement('div');d.textContent=l;term.appendChild(d);
@@ -257,10 +277,10 @@ function consoleTab(){
   const setStat=s=>{const b=$('#stBadge');if(b)b.innerHTML=badge(s)};
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?id='+encodeURIComponent(S.id));
   ws.onmessage=e=>{const m=JSON.parse(e.data);
-    if(m.t==='init'){m.logs.forEach(add);term.scrollTop=term.scrollHeight;setStat(m.status);if(m.stats)setRes(m.stats.cpu,m.stats.ram,m.limit)}
+    if(m.t==='init'){m.logs.forEach(add);term.scrollTop=term.scrollHeight;setStat(m.status);if(m.stats)setRes(m.stats.cpu,m.stats.ram,m.limit,m.stats.uptime)}
     else if(m.t==='log')add(m.d);
     else if(m.t==='status'){setStat(m.d);if(m.d==='offline')setRes(0,0,S.ram)}
-    else if(m.t==='stats')setRes(m.cpu,m.ram,m.limit);
+    else if(m.t==='stats')setRes(m.cpu,m.ram,m.limit,m.uptime);
     else if(m.t==='clear')term.innerHTML=''};
   let hist=[],hIdx=0;
   const ci=$('#ci');
@@ -270,16 +290,47 @@ function consoleTab(){
     else if(e.key==='ArrowDown'){hIdx=Math.min(hist.length,hIdx+1);ci.value=hist[hIdx]||''}};
   $('#stopc').onclick=()=>{if(ws&&ws.readyState===1)ws.send(JSON.stringify({t:'ctrl'}))}}
 
-function statsHtml(){return `<div class="stats" style="${''}">
-  <div><div class="lb"><span>CPU</span></div><div class="v" id="cpu">0%</div><div class="bar"><i id="cpub"></i></div></div>
-  <div><div class="lb"><span>RAM</span></div><div class="v" id="ram">0 / ${S.ram} MB</div><div class="bar"><i id="ramb"></i></div></div>
-  <div class="addr"><div class="lb"><span>Link</span><button class="btn yellow sm" id="cp">Salin</button></div><code id="addr">${esc(S.siteUrl)}</code></div>
+function fmtUp(ms){let s=Math.floor(ms/1000);const h=Math.floor(s/3600),m=Math.floor(s%3600/60);s=s%60;return h+'h '+m+'m '+s+'s'}
+function statsHtml(){const pan=S.address;
+  return `<div class="dash">
+   <div class="dcard addrc"><div class="dl">Address</div><div class="dv addrv">${esc(S.siteUrl)}</div>
+     <div class="dsub">Panel: <code>${esc(pan)}</code></div>
+     <div class="dact"><button class="btn yellow sm" data-copy="${esc(S.siteUrl)}">Salin link</button> <button class="btn paper sm" data-copy="${esc(pan)}">Salin panel</button></div></div>
+   <div class="dcard"><div class="dl">Uptime</div><div class="dv" id="upv">0h 0m 0s</div></div>
+   <div class="dcard"><div class="dl">CPU Load</div><div class="dv"><span id="cpu">0.0%</span> <small>/ 100%</small></div></div>
+   <div class="dcard"><div class="dl">Memory</div><div class="dv"><span id="ram">0</span> <small>/ ${S.ram} MiB</small></div></div>
+  </div>
+  <div class="dash charts">
+   <div class="dcard"><div class="dl">CPU Load realtime</div><div id="chCpu"></div></div>
+   <div class="dcard"><div class="dl">Memory realtime</div><div id="chRam"></div></div>
   </div>`}
-function setRes(cpu,ram,limit){if(!$('#cpu'))return;
-  $('#cpu').textContent=cpu.toFixed(1)+'%';$('#cpub').style.width=Math.min(100,cpu)+'%';
-  $('#ram').textContent=ram+' / '+limit+' MB';$('#ramb').style.width=(limit?Math.min(100,ram/limit*100):0)+'%'}
-function wireCopy(){const b=$('#cp');if(!b)return;
-  b.onclick=()=>{navigator.clipboard.writeText(S.siteUrl).then(()=>{b.textContent='Tersalin';setTimeout(()=>{if($('#cp'))$('#cp').textContent='Salin'},1500)}).catch(()=>{})}}
+function setRes(cpu,ram,limit,uptime){
+  HC.push(cpu);HR.push(ram);if(HC.length>60){HC.shift();HR.shift()}
+  if(!$('#cpu'))return;
+  $('#cpu').textContent=cpu.toFixed(1)+'%';
+  $('#ram').textContent=ram;
+  if(uptime!==undefined&&$('#upv'))$('#upv').textContent=fmtUp(uptime);
+  drawChart('chCpu',HC,Math.max(100,...HC),'#2F6BFF','%');
+  drawChart('chRam',HR,Math.max(limit||1,...HR),'#3DDC84',' MiB')}
+function drawChart(id,arr,max,color,unit){
+  const el=$('#'+id);if(!el)return;
+  const W=600,H=180,L=44,R=10,yTop=12,yBot=H-22;
+  const X=i=>L+(W-L-R)*(i/59);
+  const Y=v=>yBot-(yBot-yTop)*(Math.min(v,max)/max);
+  let grid='';
+  for(let g=0;g<=3;g++){const y=yBot-(yBot-yTop)*g/3;
+    grid+=`<line x1="${L}" x2="${W-R}" y1="${y}" y2="${y}" stroke="#121212" stroke-opacity=".25" stroke-dasharray="4 4"/>`+
+      `<text x="4" y="${y+4}" font-size="12" font-weight="700" fill="#121212">${Math.round(max*g/3)}${unit==='%'?'%':''}</text>`}
+  let body='';
+  if(arr.length){
+    const pts=arr.map((v,i)=>X(i).toFixed(1)+','+Y(v).toFixed(1)).join(' ');
+    const last=X(arr.length-1).toFixed(1);
+    body=`<polygon points="${L},${yBot} ${pts} ${last},${yBot}" fill="${color}" fill-opacity=".25"/>`+
+      `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="3" stroke-linejoin="round"/>`}
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;background:#fff;border:3px solid #121212;border-radius:10px">${grid}${body}</svg>`}
+function wireCopy(){
+  document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
+    navigator.clipboard.writeText(b.dataset.copy).then(()=>{const t=b.textContent;b.textContent='Tersalin';setTimeout(()=>{b.textContent=t},1200)}).catch(()=>{})})}
 
 async function filesTab(){
   const tb=$('#tb');let list;
