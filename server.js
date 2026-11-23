@@ -63,7 +63,7 @@ function startSrv(id){
   setStatus(id,'starting');
   const p=spawn('sh',['-c',s.startup||'echo "Tidak ada startup command"'],{cwd:dirOf(id),detached:true,
     env:{...process.env,PORT:String(s.port),...loadEnv(dirOf(id)),NODE_OPTIONS:`--max-old-space-size=${s.ram}`,SERVER_MEMORY:String(s.ram),SERVER_ID:id}});
-  o.p=p;o.last=null;o.prompt=false;
+  o.p=p;o.last=null;o.prompt=false;o.startedAt=Date.now();
   p.stdout.on('data',d=>{o.prompt=!/\n$/.test(d.toString());log(id,strip(d.toString()));setStatus(id,'running')});
   p.stderr.on('data',d=>{o.prompt=!/\n$/.test(d.toString());log(id,strip(d.toString()))});
   p.on('close',c=>{o.p=null;o.last=null;log(id,`[panel] Proses berhenti dengan kode ${c}`);setStatus(id,'offline')});
@@ -156,13 +156,13 @@ function treeOf(root){const map={};
   const out=[],q=[String(root)];
   while(q.length){const c=q.pop();if(map[c])out.push({pid:c,...map[c]});(kids[c]||[]).forEach(x=>q.push(x))}
   return out}
-function stats(id){const o=P(id);if(!o.p)return{cpu:0,ram:0};
+function stats(id){const o=P(id);if(!o.p)return{cpu:0,ram:0,uptime:0};
   let ticks=0,pages=0;
   for(const x of treeOf(o.p.pid)){ticks+=x.ut+x.st;
     try{pages+=+fs.readFileSync('/proc/'+x.pid+'/statm','utf8').split(' ')[1]}catch{}}
   const now=Date.now(),prev=o.last;o.last={t:now,ticks};
   let cpu=0;if(prev&&now>prev.t)cpu=((ticks-prev.ticks)/CLK)/((now-prev.t)/1000)*100;
-  return{cpu:Math.max(0,+cpu.toFixed(1)),ram:Math.round(pages*4096/1048576)}}
+  return{cpu:Math.max(0,+cpu.toFixed(1)),ram:Math.round(pages*4096/1048576),uptime:Date.now()-(o.startedAt||Date.now())}}
 setInterval(()=>{for(const id in procs){const o=procs[id];if(!o.p||!o.clients.size)continue;
   const s=db.servers.find(x=>x.id===id);emit(id,{t:'stats',...stats(id),limit:s?s.ram:0})}},2000);
 
