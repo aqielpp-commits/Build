@@ -153,7 +153,11 @@ async function api(u,opt={}){
   const h={};let body=opt.body,method=opt.method||'GET';
   if(opt.json!==undefined){h['Content-Type']='application/json';body=JSON.stringify(opt.json);method=opt.method||'POST'}
   if(opt.text!==undefined){h['Content-Type']='text/plain';body=opt.text;method=opt.method||'PUT'}
-  const r=await fetch('/api'+u,{method,headers:h,body,credentials:'same-origin'});
+  const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),15000);
+  let r;
+  try{r=await fetch('/api'+u,{method,headers:h,body,credentials:'same-origin',signal:ctl.signal})}
+  catch(e){throw new Error(e.name==='AbortError'?'Server tidak merespons (timeout). Coba muat ulang.':'Tidak bisa terhubung ke server')}
+  finally{clearTimeout(tm)}
   const ct=r.headers.get('content-type')||'';
   const data=ct.includes('application/json')?await r.json():await r.text();
   if(!r.ok)throw new Error(data&&data.error?data.error:'Gagal ('+r.status+')');
@@ -203,14 +207,20 @@ function loginView(err){closeWs();
 function loadingView(){app().innerHTML=`<div class="login"><div class="card yellow" style="text-align:center"><h1>Panel</h1><p class="sub"><span class="spin"></span>&nbsp;Memuat...</p></div></div>`}
 function withTimeout(p,ms){return Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('Server tidak merespons. Coba muat ulang halaman.')),ms))])}
 async function boot(){loadingView();
-  try{me=await withTimeout(api('/me'),10000)}catch(e){me=null;return loginView(e.message&&e.message!=='Belum login'?e.message:'')}
+  try{me=await api('/me')}catch(e){me=null;return loginView(e.message&&e.message!=='Belum login'?e.message:'')}
   route()}
 window.onhashchange=()=>{if(me)route()};
 window.addEventListener('error',e=>{const a=app();if(a&&!a.innerHTML.trim())a.innerHTML='<div class="login"><div class="card yellow"><h1>Panel</h1><p class="sub">Ada error: '+String(e.message||'')+'</p><button class="btn" onclick="location.reload()">Muat ulang</button></div></div>'});
+function showErr(e){closeWs();
+  app().innerHTML=`<div class="login"><div class="card yellow"><h1>Gagal memuat</h1><p class="sub">${esc(e&&e.message?e.message:String(e))}</p>
+   <div class="form" style="justify-content:center"><button class="btn" onclick="location.reload()">Muat ulang</button><button class="btn paper" id="ulg">Keluar</button></div></div></div>`;
+  const b=document.getElementById('ulg');
+  if(b)b.onclick=async()=>{await api('/logout',{method:'POST',json:{}}).catch(()=>{});me=null;location.hash='';loginView()}}
+function run(f){Promise.resolve().then(f).catch(showErr)}
 function route(){const h=location.hash||'#/';
-  if(h.startsWith('#/server/'))return serverView(decodeURIComponent(h.slice(9)));
-  if(h==='#/admin'&&me.admin)return adminView();
-  return listView()}
+  if(h.startsWith('#/server/'))return run(()=>serverView(decodeURIComponent(h.slice(9))));
+  if(h==='#/admin'&&me.admin)return run(()=>adminView());
+  return run(()=>listView())}
 
 async function listView(){const list=await api('/servers');
   mount(`<div class="head"><h1>Server kamu</h1><span class="chip">${list.length} server</span></div>
