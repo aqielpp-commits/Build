@@ -4,7 +4,7 @@ const express=require('express');const {WebSocketServer}=require('ws');const Adm
 const ROOT=__dirname,DATA=process.env.DATA_DIR||path.join(ROOT,'data'),SRV=path.join(DATA,'servers');
 fs.mkdirSync(SRV,{recursive:true});
 const CFG_F=path.join(ROOT,'config.json');
-const def={port:3000,telegramToken:"",adminTgIds:[],maxServersPerTgUser:1,cloudflared:true,domain:"",
+const def={port:3000,telegramToken:"",adminTgIds:[],welcomeCoins:10,maxServersPerTgUser:1,cloudflared:true,domain:"",
  plans:[{label:"1 GB",ram:1024,free:true,status:"ok"},{label:"2 GB",ram:2048,status:"soon"},{label:"3 GB",ram:3072,status:"soon"},{label:"4 GB",ram:4096,status:"soon"},{label:"5 GB",ram:5120,status:"soon"}]};
 const cfg={...def,...(fs.existsSync(CFG_F)?JSON.parse(fs.readFileSync(CFG_F)):{})};
 if(!fs.existsSync(CFG_F))fs.writeFileSync(CFG_F,JSON.stringify(cfg,null,2));
@@ -16,6 +16,9 @@ if(process.env.OWNER_TG_IDS)cfg.ownerTgIds=process.env.OWNER_TG_IDS.split(',').m
 cfg.ownerTgIds=cfg.ownerTgIds||[];
 // paket pertama gratis dan aktif, sisanya coming soon kecuali diatur status-nya di config
 cfg.plans=(cfg.plans||[]).map((p,i)=>({free:i===0,status:i===0?'ok':'soon',...p}));
+// Harga koin per paket (dipakai jika config.plans belum punya field cost)
+const PLAN_COST={1024:0,2048:2,3072:4,4096:5,5120:7};
+const planCost=p=>p.cost!==undefined?p.cost:(PLAN_COST[p.ram]||0);
 let publicUrl=process.env.PUBLIC_URL?process.env.PUBLIC_URL.replace(/\/$/,''):(cfg.domain||`http://localhost:${cfg.port}`);
 
 const TYPES={
@@ -40,7 +43,9 @@ const hash=(p,s=rnd(8))=>s+':'+crypto.scryptSync(p,s,32).toString('hex');
 const check=(p,h)=>{const [s]=h.split(':');return crypto.timingSafeEqual(Buffer.from(hash(p,s)),Buffer.from(h))};
 function addUser(username,password,admin=false,tg=null){
   if(db.users.find(u=>u.username===username))throw new Error('Username sudah ada');
-  const u={id:rnd(4),username,pass:hash(password),admin,tg};db.users.push(u);save();return u}
+  const u={id:rnd(4),username,pass:hash(password),admin,tg,coins:0,welcomed:false};db.users.push(u);save();return u}
+// bonus koin sekali untuk akun baru, diberikan saat pertama kali login
+function welcomeIfNew(u){if(u.welcomed)return;u.coins=(u.coins||0)+(cfg.welcomeCoins||10);u.welcomed=true;save()}
 if(!db.users.length){const pw=rnd(5);addUser('admin',pw,true);
   console.log(`\n=== ADMIN DIBUAT ===\nUsername: admin\nPassword: ${pw}\n====================\n`)}
 
@@ -217,7 +222,7 @@ app.use(express.json());
 app.post('/api/login',wrap((req,res)=>{const {username,password}=req.body;
   const u=db.users.find(x=>x.username===username);
   if(!u||!check(password||'',u.pass))return res.status(401).json({error:'Username atau password salah'});
-  const t=rnd(24);sessions[t]=u.id;res.setHeader('Set-Cookie',`tok=${t}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+  welcomeIfNew(u);const t=rnd(24);sessions[t]=u.id;res.setHeader('Set-Cookie',`tok=${t}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
   res.json({ok:true})}));
 app.post('/api/logout',(req,res)=>{delete sessions[cookies(req.headers.cookie).tok];res.json({ok:true})});
 app.get('/api/me',auth,(req,res)=>res.json({id:req.user.id,username:req.user.username,admin:req.user.admin,publicUrl,userCmds:USER_CMDS}));
@@ -243,7 +248,7 @@ app.post('/api/servers/:id/power',auth,srvAccess,(req,res)=>{const id=req.srv.id
   else if(a==='restart'){stopSrv(id);const t=setInterval(()=>{if(!P(id).p){clearInterval(t);startSrv(id)}},500)}
   res.json({ok:true})});
 
-app.get('/api/users',auth,adminOnly,(req,res)=>res.json(db.users.map(u=>({id:u.id,username:u.username,admin:u.admin,tg:u.tg}))));
+app.get('/api/users',auth,adminOnly,(req,res)=>res.json(db.users.map(u=>({id:u.id,username:u.username,admin:u.admin,tg:u.tg,coins:u.coins||0}))));
 app.post('/api/users',auth,adminOnly,wrap((req,res)=>{const {username,password,admin}=req.body;
   if(!username||!password)throw new Error('Isi username & password');addUser(username,password,!!admin);res.json({ok:true})}));
 app.put('/api/users/:id/password',auth,adminOnly,wrap((req,res)=>{
@@ -291,19 +296,28 @@ app.post('/api/create/register',wrap((req,res)=>{
   if(!username||!/^[a-zA-Z0-9_]{3,20}$/.test(username))throw new Error('Username 3-20 karakter (huruf, angka, _)');
   if(!password||password.length<6)throw new Error('Password minimal 6 karakter');
   const u=addUser(username,password,false,null);
-  const t=rnd(24);sessions[t]=u.id;res.setHeader('Set-Cookie',`tok=${t}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+  welcomeIfNew(u);const t=rnd(24);sessions[t]=u.id;res.setHeader('Set-Cookie',`tok=${t}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
   res.json({ok:true,username})}));
-app.get('/api/create/plans',auth,(req,res)=>res.json(cfg.plans.map(p=>({ram:p.ram,label:p.label,free:!!p.free,status:p.status}))));
+app.get('/api/create/plans',auth,(req,res)=>res.json(cfg.plans.map(p=>({ram:p.ram,label:p.label,free:!!p.free,status:p.status,cost:planCost(p)}))));
+app.get('/api/create/me',auth,(req,res)=>res.json({username:req.user.username,coins:req.user.coins||0}));
 app.get('/api/create/mine',auth,(req,res)=>res.json(db.servers.filter(s=>s.owner===req.user.id).map(pub)));
 app.post('/api/create/server',auth,wrap((req,res)=>{
   const ram=+req.body.ram,plan=cfg.plans.find(p=>p.ram===ram);
   if(!plan)throw new Error('Paket tidak ada');
   if(plan.status==='soon')throw new Error(plan.label+' segera hadir (coming soon)');
   if(plan.free&&db.servers.some(s=>s.owner===req.user.id&&s.autoDelete))throw new Error('Paket gratis hanya 1 server per akun');
+  const cost=planCost(plan);if((req.user.coins||0)<cost)throw new Error('Koin tidak cukup. Butuh '+cost+' koin, kamu punya '+(req.user.coins||0));
+  req.user.coins=(req.user.coins||0)-cost;save();
   const name=String(req.body.name||plan.label+' Server').slice(0,40);
   const s=createServer({name,owner:req.user.id,ram,type:req.body.type,createdBy:req.user.username,autoDelete:!!plan.free});
   notifyOwners('Panel baru dibuat dari web\nNama: '+s.name+'\nKode: '+s.id+'\nRAM: '+ram+' MB\nDibuat oleh: '+req.user.username);
   res.json(pub(s))}));
+
+// admin menambah / mengurangi koin user
+app.put('/api/users/:id/coins',auth,adminOnly,wrap((req,res)=>{
+  const u=db.users.find(x=>x.id===req.params.id);if(!u)throw new Error('User tidak ada');
+  const n=+req.body.amount;if(!Number.isFinite(n))throw new Error('Jumlah tidak valid');
+  u.coins=Math.max(0,(u.coins||0)+n);save();res.json({ok:true,coins:u.coins})}));
 
 app.use(express.static(path.join(ROOT,'public')));
 
@@ -332,7 +346,7 @@ const isTgAdmin=isStaffTg;
 const notifyOwners=t=>{if(cfg.telegramToken)cfg.ownerTgIds.forEach(i=>tg('sendMessage',{chat_id:i,text:t}).catch(()=>{}))};
 const srvLine=s=>`[${P(s.id).status==='offline'?'OFF':'ON'}] ${s.name} | ${s.id} | ${typeOf(s)} | ${s.ram}MB | ${(db.users.find(u=>u.id===s.owner)||{}).username||'-'}${s.autoDelete?' | gratis':''}`;
 const helpText=owner=>'Perintah staff:\n/list - semua server ON/OFF\n/del KODE - hapus server\n/panel - link panel'+(owner?'\n\nPerintah owner:\n/autodel on|off - auto delete server gratis\n/idle MENIT - waktu idle sebelum dihapus':'');
-const menu=()=>({inline_keyboard:cfg.plans.map(p=>[{text:(p.status==='soon'?'Coming soon: ':'')+p.label+(p.free?' (Gratis)':''),callback_data:'buy:'+p.ram}])});
+const menu=()=>({inline_keyboard:cfg.plans.map(p=>[{text:(p.status==='soon'?'Coming soon: ':'')+p.label+(p.free?' (Gratis)':' - '+planCost(p)+' koin'),callback_data:'buy:'+p.ram}])});
 async function tgHandle(u){
   if(u.message&&u.message.text){
     const m=u.message,parts=m.text.trim().split(/\s+/),t=parts[0].toLowerCase().split('@')[0],c=m.chat.id;
@@ -351,6 +365,11 @@ async function tgHandle(u){
       if(v!=='on'&&v!=='off')return tg('sendMessage',{chat_id:c,text:'Pakai: /autodel on atau /autodel off'});
       db.settings.autoDelete=v==='on';save();
       return tg('sendMessage',{chat_id:c,text:'Auto delete server gratis: '+(v==='on'?'AKTIF':'MATI')+' (idle '+db.settings.idleMin+' menit)'})}
+    if(owner&&t==='/koin'){
+      const target=db.users.find(x=>x.username===parts[1]),n=+parts[2];
+      if(!target||!Number.isFinite(n))return tg('sendMessage',{chat_id:c,text:'Pakai: /koin USERNAME JUMLAH (boleh minus)'});
+      target.coins=Math.max(0,(target.coins||0)+n);save();
+      return tg('sendMessage',{chat_id:c,text:'Koin '+target.username+' sekarang: '+target.coins})}
     if(owner&&t==='/idle'){
       const n=Math.floor(+parts[1]);
       if(!(n>=1))return tg('sendMessage',{chat_id:c,text:'Pakai: /idle MENIT (minimal 1)'});
@@ -366,6 +385,9 @@ async function tgHandle(u){
     const own=user?db.servers.filter(s=>s.owner===user.id).length:0;
     if(own>=cfg.maxServersPerTgUser&&!isStaffTg(c))return tg('sendMessage',{chat_id:c,text:`Batas ${cfg.maxServersPerTgUser} server per akun tercapai.`});
     if(!user){pw=rnd(4);user=addUser('user'+rnd(3),pw,false,String(c))}
+    welcomeIfNew(user);
+    const cost=planCost(plan);if((user.coins||0)<cost)return tg('sendMessage',{chat_id:c,text:`Koin tidak cukup. Butuh ${cost} koin, kamu punya ${user.coins||0}.`});
+    user.coins=(user.coins||0)-cost;save();
     const by=q.from.username?'@'+q.from.username:(q.from.first_name||String(c));
     const s=createServer({name:`Bot-${ram/1024}GB`,owner:user.id,ram,type:'node',createdBy:'telegram '+by,autoDelete:!!plan.free});
     notifyOwners('Server baru dibuat via Telegram\nNama: '+s.name+'\nKode: '+s.id+'\nRAM: '+ram+' MB\nDibuat oleh: '+by+' (ID '+c+')\nUser panel: '+user.username);
