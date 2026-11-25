@@ -84,14 +84,14 @@ function authView(){
 
 async function dashView(){
   $('#out').style.display='';
-  let plans=[],mine=[];
-  try{[plans,mine]=await Promise.all([api('/create/plans'),api('/create/mine')])}
+  let plans=[],mine=[],me={coins:0};
+  try{[plans,mine,me]=await Promise.all([api('/create/plans'),api('/create/mine'),api('/create/me')])}
   catch(e){$('#app').innerHTML=`<div class="center"><div class="card"><h2>Gagal memuat</h2><p class="muted">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Muat ulang</button></div></div>`;return}
   $('#app').innerHTML=`
-   <div class="card"><h2>Pilih paket</h2>
+   <div class="card"><h2>Pilih paket <span class="tag free">Koin: ${me.coins}</span></h2>
     <div class="grid">${plans.map((p,i)=>`<div class="plan ${p.status==='soon'?'soon':''} ${i===0?'sel':''}" data-ram="${p.ram}">
       <span class="tag ${p.status==='soon'?'soon':'free'}">${p.status==='soon'?'Coming soon':(p.free?'Gratis':'Aktif')}</span>
-      <div class="p">${esc(p.label)}</div><div class="muted">RAM ${p.ram} MB</div>
+      <div class="p">${esc(p.label)}</div><div class="muted">RAM ${p.ram} MB · ${p.free?'Gratis':p.cost+' koin'}</div>
       ${p.free?'<div class="muted" style="font-size:13px">Dihapus otomatis jika tidak dipakai 5 menit</div>':''}
     </div>`).join('')}</div>
     <div class="row" style="margin-top:20px">
