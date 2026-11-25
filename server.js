@@ -5,13 +5,17 @@ const ROOT=__dirname,DATA=process.env.DATA_DIR||path.join(ROOT,'data'),SRV=path.
 fs.mkdirSync(SRV,{recursive:true});
 const CFG_F=path.join(ROOT,'config.json');
 const def={port:3000,telegramToken:"",adminTgIds:[],maxServersPerTgUser:1,cloudflared:true,domain:"",
- plans:[{label:"1 GB RAM",ram:1024},{label:"2 GB RAM",ram:2048},{label:"3 GB RAM",ram:3072},{label:"5 GB RAM",ram:5120}]};
+ plans:[{label:"1 GB",ram:1024,free:true,status:"ok"},{label:"2 GB",ram:2048,status:"soon"},{label:"3 GB",ram:3072,status:"soon"},{label:"4 GB",ram:4096,status:"soon"},{label:"5 GB",ram:5120,status:"soon"}]};
 const cfg={...def,...(fs.existsSync(CFG_F)?JSON.parse(fs.readFileSync(CFG_F)):{})};
 if(!fs.existsSync(CFG_F))fs.writeFileSync(CFG_F,JSON.stringify(cfg,null,2));
 if(process.env.PORT)cfg.port=+process.env.PORT;
 if(process.env.TG_TOKEN)cfg.telegramToken=process.env.TG_TOKEN;
 if(process.env.ADMIN_TG_IDS)cfg.adminTgIds=process.env.ADMIN_TG_IDS.split(',').map(x=>x.trim()).filter(Boolean);
 if(process.env.CLOUDFLARED==='0')cfg.cloudflared=false;
+if(process.env.OWNER_TG_IDS)cfg.ownerTgIds=process.env.OWNER_TG_IDS.split(',').map(x=>x.trim()).filter(Boolean);
+cfg.ownerTgIds=cfg.ownerTgIds||[];
+// paket pertama gratis dan aktif, sisanya coming soon kecuali diatur status-nya di config
+cfg.plans=(cfg.plans||[]).map((p,i)=>({free:i===0,status:i===0?'ok':'soon',...p}));
 let publicUrl=process.env.PUBLIC_URL?process.env.PUBLIC_URL.replace(/\/$/,''):(cfg.domain||`http://localhost:${cfg.port}`);
 
 const TYPES={
@@ -29,6 +33,7 @@ const SHELL_RE=/^(pkg|apt|apt-get|npm|npx|yarn|pnpm|node|pip|pip3|python|python3
 // ---------- DB ----------
 const DB_F=path.join(DATA,'db.json');
 const db=fs.existsSync(DB_F)?JSON.parse(fs.readFileSync(DB_F)):{users:[],servers:[]};
+db.settings=db.settings||{autoDelete:true,idleMin:5};
 const save=()=>fs.writeFileSync(DB_F,JSON.stringify(db,null,1));
 const rnd=n=>crypto.randomBytes(n).toString('hex');
 const hash=(p,s=rnd(8))=>s+':'+crypto.scryptSync(p,s,32).toString('hex');
@@ -73,7 +78,7 @@ function stopSrv(id,sig='SIGTERM'){const o=P(id);if(!o.p)return;
   try{process.kill(-o.p.pid,sig)}catch{try{o.p.kill(sig)}catch{}}
   if(sig==='SIGTERM'){setStatus(id,'stopping');setTimeout(()=>o.p&&stopSrv(id,'SIGKILL'),10000)}}
 
-function createServer({name,owner,ram,startup,type,autostart}){
+function createServer({name,owner,ram,startup,type,autostart,createdBy,autoDelete}){
   const t=TYPES[type]?type:'node';
   const id=rnd(4);const d=dirOf(id);fs.mkdirSync(d,{recursive:true});
   fs.writeFileSync(path.join(d,'.env'),'# Variabel environment server ini. Format: KEY=VALUE\n');
@@ -86,7 +91,7 @@ function createServer({name,owner,ram,startup,type,autostart}){
   }else{
     fs.writeFileSync(path.join(d,'index.html'),'<!DOCTYPE html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Website</title></head><body style="font-family:sans-serif;text-align:center;padding:60px"><h1>Website kamu sudah online</h1><p>Upload file website kamu di tab Files.</p></body></html>\n');
   }
-  const s={id,name:name||'Server',owner,type:t,ram:+ram||1024,port:nextPort(),
+  const s={id,name:name||'Server',owner,type:t,ram:+ram||1024,port:nextPort(),createdBy:createdBy||'',autoDelete:!!autoDelete,lastActive:Date.now(),
     startup:startup||TYPES[t].startup,autostart:autostart!==false,created:Date.now()};
   db.servers.push(s);save();
   if(t==='web')P(id).status='running';
@@ -146,6 +151,20 @@ function stopCmd(id){const o=P(id);if(!o.job)return;
   try{process.kill(-o.job.pid,'SIGINT')}catch{try{o.job.kill('SIGINT')}catch{}}
   log(id,'^C');}
 
+// ---------- Auto delete server gratis yang tidak dipakai ----------
+function sweepIdle(){
+  if(!db.settings.autoDelete)return;
+  const now=Date.now(),lim=db.settings.idleMin*60000;
+  for(const s of [...db.servers]){
+    if(!s.autoDelete||P(s.id).p||P(s.id).status!=='offline')continue;
+    const la=s.lastActive||s.created||now;
+    if(now-la<lim)continue;
+    const who=(db.users.find(u=>u.id===s.owner)||{}).username||'-';
+    notifyOwners('Auto delete: server '+s.id+' ('+s.name+') milik '+who+' dihapus karena tidak dipakai '+db.settings.idleMin+' menit.');
+    deleteServer(s.id);
+  }}
+setInterval(sweepIdle,30000);
+
 // ---------- Statistik CPU & RAM (baca /proc) ----------
 const CLK=100;
 function treeOf(root){const map={};
@@ -174,7 +193,7 @@ const userOf=req=>{const t=cookies(req.headers.cookie).tok;const id=sessions[t];
 const auth=(req,res,next)=>{const u=userOf(req);if(!u)return res.status(401).json({error:'Belum login'});req.user=u;next()};
 const adminOnly=(req,res,next)=>req.user.admin?next():res.status(403).json({error:'Khusus admin'});
 const srvAccess=(req,res,next)=>{const s=db.servers.find(x=>x.id===req.params.id);
-  if(!s||!(req.user.admin||s.owner===req.user.id))return res.status(404).json({error:'Server tidak ditemukan'});req.srv=s;next()};
+  if(!s||!(req.user.admin||s.owner===req.user.id))return res.status(404).json({error:'Server tidak ditemukan'});req.srv=s;s.lastActive=Date.now();next()};
 const safe=(id,p='/')=>{const b=dirOf(id),r=path.resolve(b,'.'+path.posix.join('/',p));if(r!==b&&!r.startsWith(b+path.sep))throw new Error('Path tidak valid');return r};
 const wrap=f=>(req,res)=>{try{f(req,res)}catch(e){res.status(400).json({error:e.message})}};
 const pub=s=>{const t=typeOf(s);return{...s,type:t,typeLabel:TYPES[t].label,status:P(s.id).status,
@@ -265,6 +284,27 @@ app.post(F+'/unzip',auth,srvAccess,wrap((req,res)=>{
     fs.writeFileSync(t,e.getData());n++}
   res.json({ok:true,files:n})}));
 
+// ---------- Web create panel (halaman terpisah dari dashboard) ----------
+app.get('/create',(req,res)=>res.sendFile(path.join(ROOT,'public','create.html')));
+app.post('/api/create/register',wrap((req,res)=>{
+  const {username,password}=req.body;
+  if(!username||!/^[a-zA-Z0-9_]{3,20}$/.test(username))throw new Error('Username 3-20 karakter (huruf, angka, _)');
+  if(!password||password.length<6)throw new Error('Password minimal 6 karakter');
+  const u=addUser(username,password,false,null);
+  const t=rnd(24);sessions[t]=u.id;res.setHeader('Set-Cookie',`tok=${t}; HttpOnly; Path=/; SameSite=Lax; Max-Age=604800`);
+  res.json({ok:true,username})}));
+app.get('/api/create/plans',auth,(req,res)=>res.json(cfg.plans.map(p=>({ram:p.ram,label:p.label,free:!!p.free,status:p.status}))));
+app.get('/api/create/mine',auth,(req,res)=>res.json(db.servers.filter(s=>s.owner===req.user.id).map(pub)));
+app.post('/api/create/server',auth,wrap((req,res)=>{
+  const ram=+req.body.ram,plan=cfg.plans.find(p=>p.ram===ram);
+  if(!plan)throw new Error('Paket tidak ada');
+  if(plan.status==='soon')throw new Error(plan.label+' segera hadir (coming soon)');
+  if(plan.free&&db.servers.some(s=>s.owner===req.user.id&&s.autoDelete))throw new Error('Paket gratis hanya 1 server per akun');
+  const name=String(req.body.name||plan.label+' Server').slice(0,40);
+  const s=createServer({name,owner:req.user.id,ram,type:req.body.type,createdBy:req.user.username,autoDelete:!!plan.free});
+  notifyOwners('Panel baru dibuat dari web\nNama: '+s.name+'\nKode: '+s.id+'\nRAM: '+ram+' MB\nDibuat oleh: '+req.user.username);
+  res.json(pub(s))}));
+
 app.use(express.static(path.join(ROOT,'public')));
 
 // ---------- WebSocket console ----------
@@ -276,34 +316,60 @@ server.on('upgrade',(req,sock,head)=>{
   const s=db.servers.find(x=>x.id===id);
   if(url.pathname!=='/ws'||!u||!s||!(u.admin||s.owner===u.id))return sock.destroy();
   wss.handleUpgrade(req,sock,head,ws=>{
-    const o=P(id);o.clients.add(ws);
+    const o=P(id);o.clients.add(ws);s.lastActive=Date.now();
     ws.send(JSON.stringify({t:'init',logs:o.logs,status:o.status,stats:stats(id),limit:s.ram,isAdmin:!!u.admin,userCmds:USER_CMDS}));
     ws.on('message',m=>{try{const j=JSON.parse(m);
-      if(j.t==='cmd')runCmd(id,String(j.d),!!u.admin);
+      if(j.t==='cmd'){s.lastActive=Date.now();runCmd(id,String(j.d),!!u.admin)}
       else if(j.t==='ctrl')stopCmd(id)}catch{}});
     ws.on('close',()=>o.clients.delete(ws))})});
 
 // ---------- Telegram bot ----------
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const tg=async(m,b)=>{const r=await fetch(`https://api.telegram.org/bot${cfg.telegramToken}/${m}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()};
-const isTgAdmin=id=>cfg.adminTgIds.map(String).includes(String(id));
-const menu=()=>({inline_keyboard:cfg.plans.map(p=>[{text:'🖥 '+p.label,callback_data:'buy:'+p.ram}])});
+const isOwnerTg=id=>cfg.ownerTgIds.map(String).includes(String(id));
+const isStaffTg=id=>isOwnerTg(id)||cfg.adminTgIds.map(String).includes(String(id));
+const isTgAdmin=isStaffTg;
+const notifyOwners=t=>{if(cfg.telegramToken)cfg.ownerTgIds.forEach(i=>tg('sendMessage',{chat_id:i,text:t}).catch(()=>{}))};
+const srvLine=s=>`[${P(s.id).status==='offline'?'OFF':'ON'}] ${s.name} | ${s.id} | ${typeOf(s)} | ${s.ram}MB | ${(db.users.find(u=>u.id===s.owner)||{}).username||'-'}${s.autoDelete?' | gratis':''}`;
+const helpText=owner=>'Perintah staff:\n/list - semua server ON/OFF\n/del KODE - hapus server\n/panel - link panel'+(owner?'\n\nPerintah owner:\n/autodel on|off - auto delete server gratis\n/idle MENIT - waktu idle sebelum dihapus':'');
+const menu=()=>({inline_keyboard:cfg.plans.map(p=>[{text:(p.status==='soon'?'Coming soon: ':'')+p.label+(p.free?' (Gratis)':''),callback_data:'buy:'+p.ram}])});
 async function tgHandle(u){
-  if(u.message&&u.message.text){const m=u.message,t=m.text.split(' ')[0],c=m.chat.id;
-    if(t==='/start'||t==='/buat')return tg('sendMessage',{chat_id:c,text:'Selamat datang! Pilih paket server bot WhatsApp kamu:',reply_markup:menu()});
-    if(t==='/panel')return tg('sendMessage',{chat_id:c,text:'Panel: '+publicUrl});
-    if(isTgAdmin(c)&&t==='/list')return tg('sendMessage',{chat_id:c,text:db.servers.map(s=>`${s.id} | ${s.name} | ${typeOf(s)} | ${s.ram}MB | ${P(s.id).status}`).join('\n')||'Kosong'});
-    if(isTgAdmin(c)&&t==='/del'){const id=m.text.split(' ')[1];if(db.servers.find(s=>s.id===id)){deleteServer(id);return tg('sendMessage',{chat_id:c,text:'Dihapus '+id})}}
+  if(u.message&&u.message.text){
+    const m=u.message,parts=m.text.trim().split(/\s+/),t=parts[0].toLowerCase().split('@')[0],c=m.chat.id;
+    const staff=isStaffTg(c),owner=isOwnerTg(c);
+    if(t==='/start'||t==='/buat')return tg('sendMessage',{chat_id:c,text:'Selamat datang! Pilih paket server bot WhatsApp kamu.\nPaket 1 GB gratis. Paket lain coming soon.',reply_markup:menu()});
+    if(t==='/panel')return tg('sendMessage',{chat_id:c,text:'Dashboard panel: '+publicUrl+'\nBuat panel: '+publicUrl+'/create'});
+    if(staff&&t==='/help')return tg('sendMessage',{chat_id:c,text:helpText(owner)});
+    if(staff&&t==='/list')return tg('sendMessage',{chat_id:c,text:(db.servers.map(srvLine).join('\n')||'Belum ada server')+'\n\nTotal: '+db.servers.length+' server'});
+    if(staff&&t==='/del'){
+      const s=db.servers.find(x=>x.id===parts[1]);
+      if(!s)return tg('sendMessage',{chat_id:c,text:'Kode server tidak ditemukan. Pakai: /del KODE'});
+      deleteServer(s.id);notifyOwners('Server '+s.id+' ('+s.name+') dihapus oleh '+(m.from.username?'@'+m.from.username:(m.from.first_name||c)));
+      return tg('sendMessage',{chat_id:c,text:'Server '+s.id+' dihapus.'})}
+    if(owner&&t==='/autodel'){
+      const v=(parts[1]||'').toLowerCase();
+      if(v!=='on'&&v!=='off')return tg('sendMessage',{chat_id:c,text:'Pakai: /autodel on atau /autodel off'});
+      db.settings.autoDelete=v==='on';save();
+      return tg('sendMessage',{chat_id:c,text:'Auto delete server gratis: '+(v==='on'?'AKTIF':'MATI')+' (idle '+db.settings.idleMin+' menit)'})}
+    if(owner&&t==='/idle'){
+      const n=Math.floor(+parts[1]);
+      if(!(n>=1))return tg('sendMessage',{chat_id:c,text:'Pakai: /idle MENIT (minimal 1)'});
+      db.settings.idleMin=n;save();
+      return tg('sendMessage',{chat_id:c,text:'Waktu idle auto delete: '+n+' menit'})}
   }
-  if(u.callback_query){const q=u.callback_query,c=q.from.id;await tg('answerCallbackQuery',{callback_query_id:q.id});
+  if(u.callback_query){
+    const q=u.callback_query,c=q.from.id;await tg('answerCallbackQuery',{callback_query_id:q.id});
     if(!q.data.startsWith('buy:'))return;
-    const ram=+q.data.slice(4);if(!cfg.plans.find(p=>p.ram===ram))return;
+    const ram=+q.data.slice(4);const plan=cfg.plans.find(p=>p.ram===ram);if(!plan)return;
+    if(plan.status==='soon')return tg('sendMessage',{chat_id:c,text:plan.label+' segera hadir (coming soon).'});
     let user=db.users.find(x=>x.tg===String(c)),pw=null;
     const own=user?db.servers.filter(s=>s.owner===user.id).length:0;
-    if(own>=cfg.maxServersPerTgUser&&!isTgAdmin(c))return tg('sendMessage',{chat_id:c,text:`Batas ${cfg.maxServersPerTgUser} server per akun tercapai.`});
+    if(own>=cfg.maxServersPerTgUser&&!isStaffTg(c))return tg('sendMessage',{chat_id:c,text:`Batas ${cfg.maxServersPerTgUser} server per akun tercapai.`});
     if(!user){pw=rnd(4);user=addUser('user'+rnd(3),pw,false,String(c))}
-    const s=createServer({name:`Bot-${ram/1024}GB`,owner:user.id,ram,type:'node'});
-    await tg('sendMessage',{chat_id:c,parse_mode:'HTML',text:`<b>Server dibuat</b>\n\nRAM: ${ram} MB\nKode Server: <code>${s.id}</code>\nAddress: ${publicUrl}/#/server/${s.id}\n\nUsername: <code>${user.username}</code>\nPassword: ${pw?`<code>${pw}</code>`:'(pakai password akunmu yang lama)'}\n\nLogin ke panel, upload bot di tab Files, lalu tekan Start.`})}
+    const by=q.from.username?'@'+q.from.username:(q.from.first_name||String(c));
+    const s=createServer({name:`Bot-${ram/1024}GB`,owner:user.id,ram,type:'node',createdBy:'telegram '+by,autoDelete:!!plan.free});
+    notifyOwners('Server baru dibuat via Telegram\nNama: '+s.name+'\nKode: '+s.id+'\nRAM: '+ram+' MB\nDibuat oleh: '+by+' (ID '+c+')\nUser panel: '+user.username);
+    await tg('sendMessage',{chat_id:c,parse_mode:'HTML',text:`<b>Server dibuat</b>\n\nRAM: ${ram} MB\nKode Server: <code>${s.id}</code>\nAddress: ${publicUrl}/#/server/${s.id}\n\nUsername: <code>${user.username}</code>\nPassword: ${pw?`<code>${pw}</code>`:'(pakai password akunmu yang lama)'}\n\nLogin ke panel, upload bot di tab Files, lalu tekan Start.${s.autoDelete?`\n\nPaket gratis: server dihapus otomatis jika tidak dipakai ${db.settings.idleMin} menit.`:''}`})}
 }
 async function tgPoll(){let off=0;console.log('[telegram] bot aktif');
   for(;;){try{const r=await tg('getUpdates',{offset:off,timeout:30,allowed_updates:['message','callback_query']});
